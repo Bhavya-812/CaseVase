@@ -2,7 +2,7 @@
 
 import Phone from "@/components/Phone";
 import { Button } from "@/components/ui/button";
-import { toast } from "@/components/ui/use-toast";
+import { useToast } from "@/components/ui/use-toast";
 import { BASE_PRICE, PRODUCT_PRICES } from "@/config/products";
 import { cn, formatPrice } from "@/lib/utils";
 import { COLORS, MODELS } from "@/validators/option-validator";
@@ -13,9 +13,21 @@ import router from "next/router";
 import { useEffect, useState } from "react";
 import Confetti from "react-dom-confetti";
 
+import { createCheckoutSession } from "./actions";
+import { PayPalScriptProvider, PayPalButtons } from "@paypal/react-paypal-js";
+import { useKindeBrowserClient } from "@kinde-oss/kinde-auth-nextjs";
+import { useRouter } from "next/navigation";
+import LoginModal from "@/components/LoginModal";
+import axios from "axios";
+
 const DesignPreview = ({ configuration }: { configuration: Configuration }) => {
+  const router = useRouter();
+  const { toast } = useToast();
+  const { user } = useKindeBrowserClient();
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState<boolean>(false);
   const [showConfetti, setShowConfetti] = useState(false);
-  useEffect(() => setShowConfetti(true));
+
+  useEffect(() => setShowConfetti(true), []);
 
   const { color, model, finish, material } = configuration;
   const tw = COLORS.find(
@@ -31,6 +43,86 @@ const DesignPreview = ({ configuration }: { configuration: Configuration }) => {
     totalPrice += PRODUCT_PRICES.material.polycarbonate;
   if (finish === "textured") totalPrice += PRODUCT_PRICES.finish.textured;
 
+  const paypalCreateOrder = async () => {
+    if (user) {
+      try {
+        const response = await axios.post("/api/paypal/createorder", {
+          configId: configuration,
+        });
+
+        if (response.status !== 200) {
+          throw new Error(
+            response.data.error || "Error creating order in PayPal"
+          );
+        }
+        return response.data.orderId;
+      } catch (err) {
+        console.error("Error creating order:", err);
+        toast({
+          title: "Error",
+          description: "There was an error creating the order.",
+          variant: "destructive",
+        });
+        return null;
+      }
+    } else {
+      localStorage.setItem("configurationId", configuration.id);
+      setIsLoginModalOpen(true);
+    }
+  };
+
+  const handleCheckOut = async () => {
+    try {
+      const response = await createCheckoutSession({
+        configId: configuration.id,
+      });
+      if (response) {
+        const orderId = response.order?.id;
+        router.push(`/thankyou?orderId=${orderId}`);
+      }
+    } catch (err) {
+      console.error("Error creating order:", err);
+      toast({
+        title: "Error",
+        description: "There was an error creating the order.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const paypalCaptureOrder = async (orderId: string) => {
+    try {
+      const response = await axios.post("/api/paypal/captureorder", {
+        orderId,
+      });
+
+      if (response.status !== 200) {
+        throw new Error(
+          response.data.error || "Error capturing order in PayPal"
+        );
+      }
+
+      return response.data;
+    } catch (err) {
+      console.error("Error capturing the order:", err);
+      toast({
+        title: "Error",
+        description: "There was an error capturing the order.",
+        variant: "destructive",
+      });
+      return null;
+    }
+  };
+
+  const paypalCancelOrder = () => {
+    toast({
+      title: "Cancelled",
+      description: "The transaction was cancelled.",
+      variant: "destructive",
+    });
+    router.push(`/configure/preview?id=${configuration.id}`);
+  };
+
   return (
     <>
       <div
@@ -42,6 +134,8 @@ const DesignPreview = ({ configuration }: { configuration: Configuration }) => {
           config={{ elementCount: 200, spread: 90 }}
         />
       </div>
+
+      <LoginModal isOpen={isLoginModalOpen} setIsOpen={setIsLoginModalOpen} />
 
       <div className="mt-20 grid grid-cols-1 text-sm sm:grid-cols-12 sm:grid-rows-1 sm:gap-x-6 md:gap-x-8 lg:gap-x-12">
         <div className="sm:col-span-4 md:col-span-3 md:row-span-2 md:row-end-2">
@@ -121,9 +215,37 @@ const DesignPreview = ({ configuration }: { configuration: Configuration }) => {
             </div>
 
             <div className="mt-8 flex justify-end pb-12">
-              <Button className="px-4 sm:px-6 lg:px-8">
-                Check out <ArrowRight className="h-4 w-4 ml-1.5 inline" />
-              </Button>
+              <PayPalScriptProvider
+                options={{
+                  clientId: process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID!,
+                }}
+              >
+                <PayPalButtons
+                  style={{
+                    layout: "horizontal",
+                    color: "blue",
+                  }}
+                  createOrder={paypalCreateOrder}
+                  onApprove={async (data, actions) => {
+                    let response = await paypalCaptureOrder(data.orderID);
+                    const orderID = response.result.id;
+                    toast({
+                      title: "Success",
+                      description: `Orden aprovada: ${orderID}`,
+                      variant: "default",
+                    });
+                    actions.order?.capture().then((details) => {
+                      toast({
+                        title: "Success",
+                        description: `Orden capturada: ${details.id}`,
+                        variant: "default",
+                      });
+                      handleCheckOut();
+                    });
+                  }}
+                  onCancel={paypalCancelOrder}
+                />
+              </PayPalScriptProvider>
             </div>
           </div>
         </div>
